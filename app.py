@@ -2,9 +2,29 @@ import streamlit as st
 import pandas as pd
 import json
 import os
+import requests # 🚀 新增：用于获取网络汇率
 
 st.set_page_config(page_title="ML 选品决策大脑", layout="wide", page_icon="🧠")
-st.title("🧠 ML 跨境选品决策大脑 (双轨上帝视角版)")
+st.title("🧠 ML 跨境选品决策大脑 (自动汇率版)")
+
+# ==========================================
+# 🌐 0. 自动获取实时汇率 (带缓存机制)
+# ==========================================
+@st.cache_data(ttl=3600) # 缓存1小时，防止频繁请求导致网页卡顿或被封IP
+def get_realtime_exchange_rate():
+    try:
+        # 使用免费的公开金融 API 获取 MXN (墨西哥比索) 的实时汇率
+        url = "https://api.exchangerate-api.com/v4/latest/MXN"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        # 提取对人民币 (CNY) 的汇率
+        return float(data['rates']['CNY'])
+    except:
+        # 如果断网或 API 故障，启用保底默认汇率
+        return 0.360
+
+# 网页一打开，就在后台秒速获取最新汇率
+current_realtime_rate = get_realtime_exchange_rate()
 
 # ==========================================
 # 📁 1. 双轨制载入数据源
@@ -12,7 +32,6 @@ st.title("🧠 ML 跨境选品决策大脑 (双轨上帝视角版)")
 st.sidebar.header("📁 1. 载入数据源")
 uploaded_file = st.sidebar.file_uploader("上传最新 data.json (将覆盖默认数据)", type=['json'])
 
-# 核心升级：智能判定数据源
 raw_data = None
 if uploaded_file is not None:
     raw_data = json.load(uploaded_file)
@@ -31,11 +50,21 @@ ml_fee = st.sidebar.slider("平台抽成+税费 (%)", 10, 30, 17) / 100
 shipping_cost = st.sidebar.number_input("单件国际+尾程运费 (比索)", value=75.0)
 
 st.sidebar.markdown("---")
-st.sidebar.header("🛡️ 3. 基础过滤漏斗")
+st.sidebar.header("💱 3. 汇率设置")
+# 🚀 核心升级：输入框的默认值直接绑定刚刚抓取的真实汇率！
+exchange_rate = st.sidebar.number_input(
+    "当前汇率 (1 比索 = ? 人民币)", 
+    value=current_realtime_rate, 
+    format="%.4f", 
+    help="🤖 已自动获取国际外汇市场最新汇率，你也可以手动微调"
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("🛡️ 4. 基础过滤漏斗")
 
 col_a, col_b = st.sidebar.columns(2)
-min_price = col_a.number_input("最低售价", value=100)
-max_price = col_b.number_input("最高售价", value=5000)
+min_price = col_a.number_input("最低售价 (比索)", value=100)
+max_price = col_b.number_input("最高售价 (比索)", value=5000)
 
 target_margin = st.sidebar.slider("你的目标净利率 (%)", 5, 50, 15) / 100
 min_reviews = st.sidebar.number_input("最低评价数", value=10)
@@ -48,15 +77,15 @@ if raw_data is not None:
     df = pd.DataFrame(raw_data)
     
     if 'price' in df.columns:
-        # 1. 价格区间过滤
         df = df[(df['price'] >= min_price) & (df['price'] <= max_price)].copy()
         
         if not df.empty:
-            # 2. 财务核算
             df['预估单件净利'] = df['price'] * target_margin
             df['进货底线价'] = df['price'] - (df['price'] * ml_fee) - shipping_cost - df['预估单件净利']
             
-            # 计算 ROI (加入防报错机制，防止除以0)
+            df['售价(RMB)'] = df['price'] * exchange_rate
+            df['进货底线价(RMB)'] = df['进货底线价'] * exchange_rate
+            
             df['当前设置下ROI'] = df.apply(
                 lambda row: (row['预估单件净利'] / (row['进货底线价'] + shipping_cost)) if (row['进货底线价'] + shipping_cost) > 0 else -1, 
                 axis=1
@@ -65,24 +94,18 @@ if raw_data is not None:
             if 'reviews' in df.columns:
                 df['预估历史总产值'] = df['price'] * df['reviews']
             
-            # 3. 基础条件过滤 (不再过滤负利润，只过滤评价数和发货方式)
             if 'reviews' in df.columns:
                 df = df[df['reviews'] >= min_reviews]
             if only_full and 'shipping' in df.columns:
                 df = df[df['shipping'] == "Full (官方仓)"]
             
-            # 🚀 核心解封：只要符合基础条件，全部展示！
             recommended_df = df.copy()
-            
-            # 单独计算出真正有利润的商品数量，用于顶部展示
             profitable_count = len(recommended_df[recommended_df['进货底线价'] > 0])
 
-            # --- 界面展示 ---
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("📦 价格区间样本", len(df))
             col2.metric("👁️ 展出竞品总数", len(recommended_df))
             
-            # 用颜色区分到底有没有好品
             if profitable_count > 0:
                 col3.metric("🟢 利润达标款 (底线价>0)", profitable_count)
             else:
@@ -92,28 +115,25 @@ if raw_data is not None:
                 col4.metric("💰 展出品均价", f"${recommended_df['price'].mean():.2f}")
 
             st.markdown("---")
-
             st.subheader("📋 市场全量清单 (按进货空间从高到低排序)")
             
-            # 生成 1688 图搜通用链接
             recommended_df['1688链接'] = "https://www.1688.com/"
-            # 按进货底线价排序，把利润最高的排在最上面，亏本的最下面
             recommended_df = recommended_df.sort_values(by='进货底线价', ascending=False)
             
-            display_cols = ['image', 'title', 'price']
+            display_cols = ['image', 'title', 'price', '售价(RMB)']
             if 'reviews' in recommended_df.columns: display_cols.append('reviews')
-            if '预估历史总产值' in recommended_df.columns: display_cols.append('预估历史总产值')
-            display_cols.extend(['进货底线价', '当前设置下ROI', '1688链接'])
+            display_cols.extend(['进货底线价', '进货底线价(RMB)', '当前设置下ROI', '1688链接'])
 
             st.dataframe(
                 recommended_df[display_cols],
                 column_config={
-                    "image": st.column_config.ImageColumn("📸 主图 (右键复制)"),
+                    "image": st.column_config.ImageColumn("📸 主图"),
                     "title": "西班牙语标题",
-                    "price": st.column_config.NumberColumn("竞品售价", format="$%.2f"),
+                    "price": st.column_config.NumberColumn("竞品售价 (比索)", format="$%.2f"),
+                    "售价(RMB)": st.column_config.NumberColumn("售价 (人民币)", format="¥%.2f"),
                     "reviews": st.column_config.NumberColumn("评价数 (热度)"),
-                    "预估历史总产值": st.column_config.NumberColumn("🔥 预估产值", format="$%d"),
-                    "进货底线价": st.column_config.NumberColumn("⚠️ 1688进货警戒线", format="$%.2f"),
+                    "进货底线价": st.column_config.NumberColumn("⚠️ 底线价 (比索)", format="$%.2f"),
+                    "进货底线价(RMB)": st.column_config.NumberColumn("🇨🇳 1688底线价 (人民币)", format="¥%.4f"),
                     "当前设置下ROI": st.column_config.NumberColumn("🚀 预估 ROI", format="%.0f%%"),
                     "1688链接": st.column_config.LinkColumn("🛒 去核价", display_text="图搜1688")
                 },
