@@ -2,28 +2,24 @@ import streamlit as st
 import pandas as pd
 import json
 import os
-import requests # 🚀 新增：用于获取网络汇率
+import requests
 
 st.set_page_config(page_title="ML 选品决策大脑", layout="wide", page_icon="🧠")
-st.title("🧠 ML 跨境选品决策大脑 (自动汇率版)")
+st.title("🧠 ML 跨境选品决策大脑 (终极完全体版)")
 
 # ==========================================
 # 🌐 0. 自动获取实时汇率 (带缓存机制)
 # ==========================================
-@st.cache_data(ttl=3600) # 缓存1小时，防止频繁请求导致网页卡顿或被封IP
+@st.cache_data(ttl=3600) # 缓存1小时，保证网页不卡顿
 def get_realtime_exchange_rate():
     try:
-        # 使用免费的公开金融 API 获取 MXN (墨西哥比索) 的实时汇率
         url = "https://api.exchangerate-api.com/v4/latest/MXN"
         response = requests.get(url, timeout=5)
         data = response.json()
-        # 提取对人民币 (CNY) 的汇率
         return float(data['rates']['CNY'])
     except:
-        # 如果断网或 API 故障，启用保底默认汇率
-        return 0.360
+        return 0.360 # 断网保底汇率
 
-# 网页一打开，就在后台秒速获取最新汇率
 current_realtime_rate = get_realtime_exchange_rate()
 
 # ==========================================
@@ -51,7 +47,6 @@ shipping_cost = st.sidebar.number_input("单件国际+尾程运费 (比索)", va
 
 st.sidebar.markdown("---")
 st.sidebar.header("💱 3. 汇率设置")
-# 🚀 核心升级：输入框的默认值直接绑定刚刚抓取的真实汇率！
 exchange_rate = st.sidebar.number_input(
     "当前汇率 (1 比索 = ? 人民币)", 
     value=current_realtime_rate, 
@@ -61,7 +56,6 @@ exchange_rate = st.sidebar.number_input(
 
 st.sidebar.markdown("---")
 st.sidebar.header("🛡️ 4. 基础过滤漏斗")
-
 col_a, col_b = st.sidebar.columns(2)
 min_price = col_a.number_input("最低售价 (比索)", value=100)
 max_price = col_b.number_input("最高售价 (比索)", value=5000)
@@ -75,6 +69,10 @@ only_full = st.sidebar.checkbox("只看 Full 仓竞品", value=False)
 # ==========================================
 if raw_data is not None:
     df = pd.DataFrame(raw_data)
+    
+    # 🚀 核心清洗逻辑 —— 去除套娃重复商品
+    if not df.empty and all(col in df.columns for col in ['title', 'price', 'image']):
+        df = df.drop_duplicates(subset=['title', 'price', 'image'], keep='first')
     
     if 'price' in df.columns:
         df = df[(df['price'] >= min_price) & (df['price'] <= max_price)].copy()
@@ -103,7 +101,7 @@ if raw_data is not None:
             profitable_count = len(recommended_df[recommended_df['进货底线价'] > 0])
 
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric("📦 价格区间样本", len(df))
+            col1.metric("📦 清洗后样本量", len(df))
             col2.metric("👁️ 展出竞品总数", len(recommended_df))
             
             if profitable_count > 0:
